@@ -1,0 +1,79 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'sliinfo'
+
+require 'optparse'
+
+require 'opensearch-ruby'
+
+slo = Slo.new(0.999)
+
+options = {
+  sort_by: :service,
+}
+
+OptionParser.new do |opts|
+  opts.on('-s', '--sort-by=METHOD', %w[vhost sli usage errors error_budget], 'Sort results') do |method|
+    options[:sort_by] = {
+      'sli'          => :value,
+      'vhost'        => :service,
+      'usage'        => :usage,
+      'errors'       => :errors,
+      'error_budget' => :error_budget_usage,
+    }[method]
+  end
+end.parse!
+
+client = OpenSearch::Client.new(log: false)
+
+index = Time.now.strftime('logs-%Y.%m.*')
+index = ARGV[0] if ARGV.count == 1
+
+vhosts = client.search(
+  index: index,
+  body: {
+    size: 0,
+    query: { bool: { must: [{ match_phrase: { tags: '.source.s_nginx_access' } },
+                            { match: { 'apache.limit_req_status' => 'PASSED' } },] } },
+    aggs: {
+      vhosts: {
+
+        terms: {
+          field: 'apache.vhost.keyword',
+          size: 250,
+        },
+        aggs: {
+          err: {
+            range: {
+              field: 'apache.response',
+              ranges: [
+                {
+                  from: 500,
+                  to: 599,
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+slis = []
+vhosts['aggregations']['vhosts']['buckets'].each do |data|
+  slis << Sli.new(data['key'], data['doc_count'], data['err']['buckets'][0]['doc_count'], slo)
+end
+
+puts format("%<service>-42s %<value>7s   %<error_budget_usage>9s  Errors\n", service: 'Virtual Host', value: 'SLI', error_budget_usage: 'EB Usg')
+slis.sort_by(&(options[:sort_by])).each do |sli|
+  color = if sli.within_range?
+            "\033[31m"
+          else
+            "\033[32m"
+          end
+  puts format("%<color>s%<service>-42s %<value>s %<error_budget_usage>s %<errors>8d/%<usage>d\033[0m\n", color: color, service: sli.service, value: sli.value_pct, error_budget_usage: sli.error_budget_usage_pct, errors: sli.errors, usage: sli.usage)
+end
+
+warn('aggregation missed some documents') if (vhosts['aggregations']['vhosts']['sum_other_doc_count']).positive?
