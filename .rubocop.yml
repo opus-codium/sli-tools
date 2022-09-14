@@ -1,4 +1,11 @@
 ---
+AllCops:
+  TargetRubyVersion: '2.5'
+  AllowSymlinksInCacheRootDirectory: true
+  NewCops: enable
+require:
+- rubocop-rake
+- rubocop-rspec
 Layout/HashAlignment:
   EnforcedHashRocketStyle: table
 Layout/LineLength:

@@ -1,19 +1,28 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require 'sliinfo'
+require 'sli_tools'
 
+require 'date'
 require 'optparse'
 
 require 'opensearch-ruby'
 
-slo = Slo.new(0.999)
-
 options = {
+  index: nil,
+  must: [],
   sort_by: :service,
+  slo: 0.999,
+  offset: 0,
+  moving: 0,
+  since: nil,
+  until: nil,
 }
 
-OptionParser.new do |opts|
+OptionParser.new do |opts| # rubocop:disable Metrics/BlockLength
+  opts.separator('')
+  opts.separator('Options:')
+
   opts.on('-s', '--sort-by=METHOD', %w[vhost sli usage errors error_budget], 'Sort results') do |method|
     options[:sort_by] = {
       'sli'          => :value,
@@ -23,15 +32,82 @@ OptionParser.new do |opts|
       'error_budget' => :error_budget_usage,
     }[method]
   end
+
+  opts.on('-l', '--slo=SLO', "Use this SLO instead of the default (#{options[:slo]})") do |slo|
+    case slo
+    when /\A99\.9+\z/
+      options[:slo] = slo.to_f / 100
+    when /\A0?\.9+\z/
+      options[:slo] = slo.to_f
+    when /\A9+\z/
+      options[:slo] = "0.#{slo}".to_f
+    when /\A[1-9]\z/
+      options[:slo] = "0.#{'9' * slo.to_i}".to_f
+    else
+      raise 'Malformed SLO'
+    end
+  end
+
+  opts.separator('')
+  opts.separator('Options for showing SLI based on indices:')
+
+  opts.on('-i', '--index=INDEX', 'Use index INDEX (can use pattern matching)') do |index|
+    options[:index] = index
+  end
+
+  opts.separator('')
+  opts.separator('Options for showing SLI over a time window:')
+
+  opts.on('-m', '--moving=DAYS', 'Show moving SLI over the last DAYS days') do |moving|
+    options[:moving] = moving.to_i
+  end
+
+  opts.on('-o', '--offset=DAYS', 'Offset moving SLI DAYS days in the past') do |offset|
+    options[:offset] = offset.to_i
+  end
+
+  opts.separator('')
+  opts.separator('Options for showing SLI over fixed dates:')
+
+  opts.on('-S', '--since=DATE', 'Show SLI since DATE') do |date|
+    options[:since] = DateTime.parse(date)
+  end
+
+  opts.on('-U', '--until=DATE', 'Show SLI until DATE') do |date|
+    options[:until] = DateTime.parse(date)
+  end
 end.parse!
+
+if options[:moving].positive?
+  options[:must] << {
+    range: {
+      '@timestamp' => {
+        gte: ((DateTime.now - options[:offset] - options[:moving]).to_time.to_f * 1000).round,
+        lte: ((DateTime.now - options[:offset]).to_time.to_f * 1000).round,
+        format: 'epoch_millis',
+      },
+    },
+  }
+elsif options[:since] && options[:until]
+  options[:must] << {
+    range: {
+      '@timestamp' => {
+        gte: (options[:since].to_time.to_f * 1000).round,
+        lte: (options[:until].to_time.to_f * 1000).round,
+        format: 'epoch_millis',
+      },
+    },
+  }
+else
+  options[:index] ||= Time.now.strftime('logs-%Y.%m.*')
+end
+
+slo = SliTools::Slo.new(options[:slo])
 
 client = OpenSearch::Client.new(log: false)
 
-index = Time.now.strftime('logs-%Y.%m.*')
-index = ARGV[0] if ARGV.count == 1
-
 vhosts = client.search(
-  index: index,
+  index: options[:index],
   body: {
     size: 0,
     query: { bool: { must: [{ match_phrase: { tags: '.source.s_nginx_access' } },
@@ -63,7 +139,7 @@ vhosts = client.search(
 
 slis = []
 vhosts['aggregations']['vhosts']['buckets'].each do |data|
-  slis << Sli.new(data['key'], data['doc_count'], data['err']['buckets'][0]['doc_count'], slo)
+  slis << SliTools::Sli.new(data['key'], data['doc_count'], data['err']['buckets'][0]['doc_count'], slo)
 end
 
 puts format("%<service>-42s %<value>7s   %<error_budget_usage>9s  Errors\n", service: 'Virtual Host', value: 'SLI', error_budget_usage: 'EB Usg')

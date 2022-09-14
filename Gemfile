@@ -2,6 +2,5 @@
 
 source 'https://rubygems.org'
 
-gem 'opensearch-ruby'
-gem 'rspec'
-gem 'rubocop'
+# Specify your gem's dependencies in sli-tools.gemspec
+gemspec
