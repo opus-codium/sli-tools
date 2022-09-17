@@ -110,8 +110,11 @@ vhosts = client.search(
   index: options[:index],
   body: {
     size: 0,
-    query: { bool: { must: [{ match_phrase: { tags: '.source.s_nginx_access' } },
-                            { match: { 'apache.limit_req_status' => 'PASSED' } },] } },
+    query: {
+      bool: {
+        must: options[:must],
+      },
+    },
     aggs: {
       vhosts: {
 
